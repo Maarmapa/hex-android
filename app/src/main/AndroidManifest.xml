@@ -8,5 +8,8 @@
             <intent-filter><action android:name="android.view.inputmethod.InputMethod"/></intent-filter>
             <meta-data android:name="android.view.im" android:resource="@xml/method"/>
         </service>
+        <activity android:name="cl.maarmapa.hexandroid.settings.SettingsActivity"
+                  android:exported="true"
+                  android:label="Hex — ajustes"/>
     </application>
 </manifest>
