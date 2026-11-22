@@ -399,8 +399,10 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
     private val lock = Any()
     private var sesionEncoder: OrtSession? = null
     private var sesionDecoder: OrtSession? = null
-    private var dimEstado1 = 0
-    private var dimEstado2 = 0
+    private var dimEstado1A = 0 // primera dim de input_states_1: [A, 1, C]
+    private var dimEstado1C = 0
+    private var dimEstado2A = 0
+    private var dimEstado2C = 0
     private var dimEncoder = 0
 
     private val vocab: VocabularioParakeet by lazy {
@@ -428,8 +430,8 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
             framesValidos = framesCod,
             tamanoVocab = vocab.tamano,
             indiceVacio = vocab.indiceVacio,
-            estadoInicial1 = FloatArray(dimEstado1),
-            estadoInicial2 = FloatArray(dimEstado2),
+            estadoInicial1 = FloatArray(dimEstado1A * dimEstado1C),
+            estadoInicial2 = FloatArray(dimEstado2A * dimEstado2C),
             frameEn = { t -> codificacion.copyOfRange(t * dimEncoder, (t + 1) * dimEncoder) },
             paso = PasoTransductor { prev, e1, e2, frame -> pasoDecoder(env, prev, e1, e2, frame) },
         )
@@ -451,13 +453,18 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
         )
         val sesion = sesionEncoder ?: error("sesión del encoder no inicializada")
         sesion.run(mapOf("audio_signal" to tensorMel, "length" to tensorLen)).use { res ->
-            val salidas = res.get(0) as OnnxTensor // "outputs": [1, T', dim]
+            val salidas = res.get(0) as OnnxTensor // "outputs": [1, T', dim], con T' dinámico
             val forma = (salidas.info as TensorInfo).shape
-            val frames = forma[1].toInt()
-            val dim = forma[2].toInt()
+            // La dim temporal es simbólica (ORT la reporta como -1), así que el nº de
+            // frames se deduce del tamaño del buffer; la dim del canal sí es estática.
+            val dim = if (forma.size > 2 && forma[2] > 0) forma[2].toInt() else 512
+            val buffer = salidas.floatBuffer
+            val total = buffer.remaining()
+            require(total % dim == 0) { "salida del encoder de tamaño inesperado: $total / dim $dim" }
+            val frames = total / dim
             dimEncoder = dim
-            val datos = FloatArray(frames * dim)
-            salidas.floatBuffer.get(datos, 0, frames * dim)
+            val datos = FloatArray(total)
+            buffer.get(datos, 0, total)
             val encodedLen = ((res.get(1) as OnnxTensor).longBuffer.get(0)).toInt()
             return datos to encodedLen.coerceAtMost(frames)
         }
@@ -469,7 +476,7 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
         e1: FloatArray,
         e2: FloatArray,
         frame: FloatArray,
-    ): PasoTransductor.Salida {
+    ): SalidaPasoTransductor {
         val sesion = sesionDecoder ?: error("sesión del decoder no inicializada")
         val tFrame = OnnxTensor.createTensor(env, FloatBuffer.wrap(frame), longArrayOf(1, dimEncoder.toLong(), 1))
         val tPrev = OnnxTensor.createTensor(
@@ -477,10 +484,10 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
         )
         val tLen = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(1)), longArrayOf(1))
         val tE1 = OnnxTensor.createTensor(
-            env, FloatBuffer.wrap(e1), longArrayOf(dimEstado1.toLong(), 1L, dimEstado1.toLong()),
+            env, FloatBuffer.wrap(e1), longArrayOf(dimEstado1A.toLong(), 1L, dimEstado1C.toLong()),
         )
         val tE2 = OnnxTensor.createTensor(
-            env, FloatBuffer.wrap(e2), longArrayOf(dimEstado2.toLong(), 1L, dimEstado2.toLong()),
+            env, FloatBuffer.wrap(e2), longArrayOf(dimEstado2A.toLong(), 1L, dimEstado2C.toLong()),
         )
         sesion.run(
             mapOf(
@@ -500,7 +507,7 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
             val s2 = (res.get(2) as OnnxTensor).floatBuffer
             val a2 = FloatArray(s2.remaining())
             s2.get(a2)
-            return PasoTransductor.Salida(arrLogits, a1, a2)
+            return SalidaPasoTransductor(arrLogits, a1, a2)
         }
     }
 
@@ -527,8 +534,10 @@ class ParakeetOnnxTranscriber(private val context: Context) : Transcriber {
             require(forma1[0] > 0 && forma1[2] > 0 && forma2[0] > 0 && forma2[2] > 0) {
                 "no se pudo inferir el tamaño de estado del decoder_joint"
             }
-            dimEstado1 = (forma1[0] * forma1[2]).toInt()
-            dimEstado2 = (forma2[0] * forma2[2]).toInt()
+            dimEstado1A = forma1[0].toInt()
+            dimEstado1C = forma1[2].toInt()
+            dimEstado2A = forma2[0].toInt()
+            dimEstado2C = forma2[2].toInt()
             sesionDecoder = sesionD
         }
     }
